@@ -38,6 +38,7 @@ class TacticalPlanner:
         self,
         now_hour: int,
         fixed_intervals: Optional[List[Tuple[int, int]]] = None,
+        time_limit: float = 10.0,
     ) -> Optional[pd.DataFrame]:
         """Расписание в абсолютных часах симуляции.
 
@@ -45,13 +46,14 @@ class TacticalPlanner:
         из эксплуатации (длительные ревизии, ремонты) — учитываются в
         ограничении готовности и загрузке депо.
         """
+        self.session.expire_all()
         fixed_intervals = fixed_intervals or []
         trains = self._get_trains_needing_service(now_hour)
         if not trains:
             return None
 
         logger.info("Тактическое планирование: {} поездов, t={}", len(trains), now_hour)
-        schedule = self._optimize_schedule(trains, now_hour, fixed_intervals)
+        schedule = self._optimize_schedule(trains, now_hour, fixed_intervals, time_limit)
         if schedule is None or schedule.empty:
             logger.warning("CP-SAT не дал решения — жадный алгоритм")
             schedule = self._greedy_schedule(trains, now_hour)
@@ -103,7 +105,8 @@ class TacticalPlanner:
         return max(1, int(round(base * (1 + config.UNPLANNED_OVERHEAD[service_type]))))
 
     def _optimize_schedule(self, trains: List[Dict], now_hour: int,
-                           fixed: List[Tuple[int, int]]) -> Optional[pd.DataFrame]:
+                           fixed: List[Tuple[int, int]],
+                           time_limit: float = 10.0) -> Optional[pd.DataFrame]:
         model = cp_model.CpModel()
         horizon_end = now_hour + self.horizon_hours
 
@@ -157,7 +160,7 @@ class TacticalPlanner:
             start_v[t["train_id"]] * max(1, int(t["urgency"] * 100)) for t in trains))
 
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 10.0
+        solver.parameters.max_time_in_seconds = time_limit
         status = solver.Solve(model)
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             logger.warning("CP-SAT: {}", solver.StatusName(status))

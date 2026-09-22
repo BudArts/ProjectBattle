@@ -32,12 +32,17 @@ class StrategicPlanner:
         self.session = get_session(db_engine)
         self.now = now or datetime.fromisoformat(config.OPERATION_START_DATE)
         self.horizon_months = 12
-        self.monthly_capacity = {"IS510": 6, "IS520": 5, "IS530": 4,
-                                 "IS540": 4, "IS600": 2, "IS700": 1}
+        # Физический потолок, а не «красивое» число: иначе план невыполним
+        # (на поезд приходится до 12 заходов IS510+ в год). Равномерность
+        # даёт целевая функция, а не заниженный лимит.
+        # IS600/IS700 ограничены 3 путями с домкратами.
+        self.monthly_capacity = {"IS510": 40, "IS520": 24, "IS530": 16,
+                                 "IS540": 8, "IS600": 3, "IS700": 2}
 
     # ------------------------------------------------------------------ API
     def create_annual_plan(self) -> List[Dict]:
         """Список событий: [{train_id, train_number, service_type, month}]."""
+        self.session.expire_all()
         logger.info("Стратегическое планирование на 12 месяцев от {}", self.now.date())
         jobs = self._forecast_service_needs()
         if not jobs:
@@ -64,14 +69,16 @@ class StrategicPlanner:
 
     # ------------------------------------------------------------- прогноз
     def _forecast_service_needs(self) -> List[Dict]:
-        """Все ревизии, наступающие в горизонте года (по каждой — своё событие).
+        """Ревизии года с учётом иерархии.
 
-        Приближение: после каждой запланированной ревизии счётчик сбрасывается,
-        поэтому следующая ревизия того же уровня сдвигается на период.
+        IS540 включает IS510–IS530: отдельный заход на младший цикл в ту же
+        точку пробега не планируется. Иначе депо получает фиктивную двойную
+        нагрузку, которой в технологии нет.
         """
         trains = self.session.query(Train).filter(
             Train.status.in_([OPERATIONAL, RESERVE])).all()
         annual = config.ANNUAL_MILEAGE_PER_TRAIN
+        rank = {s: i for i, s in enumerate(config.STRATEGIC_SERVICES)}
         jobs = []
 
         for train in trains:
@@ -79,26 +86,43 @@ class StrategicPlanner:
             delay_months = 0.0
             if commissioned > self.now:
                 delay_months = (commissioned - self.now).days / 30.4
+                if delay_months >= self.horizon_months:
+                    continue
 
-            for stype in config.STRATEGIC_SERVICES:
-                current = getattr(train, f"mileage_since_{stype.lower()}") or 0
-                period_months = (config.MILEAGE_TRIGGERS[stype] / annual) * 12
-                remaining = config.MILEAGE_TRIGGERS[stype] - current
-                first_months = (max(0.0, remaining) / annual) * 12
-
-                # все наступления этого уровня в горизонте года
-                m = first_months
-                while m <= self.horizon_months - 1:
-                    month = max(m, delay_months)
-                    if month <= self.horizon_months - 1:
-                        jobs.append({
-                            "train_id": train.id,
-                            "train_number": train.number,
-                            "service_type": stype,
-                            "months_to_service": month,
-                            "priority": config.SERVICE_CRITICALITY[stype],
-                        })
-                    m += period_months
+            counters = {
+                stype: getattr(train, f"mileage_since_{stype.lower()}") or 0.0
+                for stype in config.STRATEGIC_SERVICES
+            }
+            km = 0.0
+            for _ in range(48):
+                best_rem, best_type = None, None
+                for stype, cur in counters.items():
+                    rem = max(0.0, config.MILEAGE_TRIGGERS[stype] - cur)
+                    if (best_rem is None or rem < best_rem - 0.5
+                            or (abs(rem - best_rem) <= 0.5 and rank[stype] > rank[best_type])):
+                        best_rem, best_type = rem, stype
+                if best_rem is None or km + best_rem > annual + 1:
+                    break
+                km += best_rem
+                for stype in counters:
+                    counters[stype] += best_rem
+                due = [s for s in counters
+                       if counters[s] >= config.MILEAGE_TRIGGERS[s] - 1.0]
+                if not due:
+                    break
+                chosen = max(due, key=lambda s: rank[s])
+                month = max((km / annual) * 12.0, delay_months)
+                if month <= self.horizon_months - 0.05:
+                    jobs.append({
+                        "train_id": train.id,
+                        "train_number": train.number,
+                        "service_type": chosen,
+                        "months_to_service": month,
+                        "priority": config.SERVICE_CRITICALITY[chosen],
+                    })
+                for level in config.SERVICE_HIERARCHY.get(chosen, [chosen]):
+                    if level in counters:
+                        counters[level] = 0.0
         return jobs
 
     # ---------------------------------------------------------- оптимизация

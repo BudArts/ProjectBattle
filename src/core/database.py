@@ -11,7 +11,7 @@ import os
 from datetime import datetime, timedelta
 
 from sqlalchemy import (Boolean, Column, DateTime, Float, ForeignKey, Integer,
-                        JSON, String, create_engine)
+                        JSON, String, create_engine, inspect, text)
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 from .config import config
@@ -43,6 +43,7 @@ class Train(Base):
     mileage_since_wheelset = Column(Float, default=0.0)
     commissioned_date = Column(DateTime)
     last_maintenance_date = Column(DateTime)
+    location = Column(String(16), default="spb")
     maintenance_events = relationship("MaintenanceEvent", back_populates="train")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -97,14 +98,34 @@ class Schedule(Base):
 
 def init_db(db_url='sqlite:///data/hsr.db'):
     """Создать движок БД, при необходимости создав каталог под файл."""
+    connect_args = {}
     if db_url.startswith('sqlite:///') and db_url != 'sqlite:///:memory:':
         path = db_url[len('sqlite:///'):]
         dirname = os.path.dirname(path)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
-    engine = create_engine(db_url, echo=False)
+        connect_args = {"check_same_thread": False}
+    elif db_url.startswith("sqlite:"):
+        connect_args = {"check_same_thread": False}
+    engine = create_engine(db_url, echo=False, connect_args=connect_args)
     Base.metadata.create_all(engine)
+    _ensure_columns(engine)
     return engine
+
+
+def _ensure_columns(engine):
+    """Добавить колонки, которых не было в базе предыдущей версии."""
+    try:
+        insp = inspect(engine)
+        if "trains" not in insp.get_table_names():
+            return
+        cols = {c["name"] for c in insp.get_columns("trains")}
+    except Exception:
+        return
+    if "location" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE trains ADD COLUMN location VARCHAR(16) DEFAULT 'spb'"))
 
 
 def get_session(engine):
@@ -120,8 +141,12 @@ def hour_to_datetime(hour: float) -> datetime:
     return base_datetime() + timedelta(hours=hour)
 
 
-def seed_initial_data(session, num_trains=43, reset=False):
-    """Создать начальный парк поездов (фазированный ввод, как в постановке)."""
+def seed_initial_data(session, num_trains=43, reset=False, phased=True):
+    """Создать начальный парк поездов.
+
+    phased=True — ввод как в постановке: 6 составов сразу, далее по одному в месяц.
+    phased=False — весь парк на линии с первого дня (нормальный год эксплуатации).
+    """
     if reset:
         session.query(ServiceSegment).delete()
         session.query(MaintenanceEvent).delete()
@@ -134,7 +159,7 @@ def seed_initial_data(session, num_trains=43, reset=False):
 
     base = base_datetime()
     for i in range(1, num_trains + 1):
-        if i <= 6:
+        if (not phased) or i <= 6:
             commissioned = base
             status = OPERATIONAL
         else:

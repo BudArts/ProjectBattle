@@ -29,7 +29,7 @@ def run_sim(args):
 
     engine = init_db()
     session = get_session(engine)
-    seed_initial_data(session, num_trains=43, reset=args.reset)
+    seed_initial_data(session, num_trains=43, reset=args.reset, phased=not args.full_fleet)
 
     sim = IntegratedFleetSimulator(engine, num_trains=43,
                                    use_planning=not args.no_planning,
@@ -74,6 +74,8 @@ def main():
                      choices=["normal", "high_load", "poor_maintenance"])
     sim.add_argument("--no-planning", action="store_true")
     sim.add_argument("--reset", action="store_true")
+    sim.add_argument("--full-fleet", action="store_true",
+                     help="весь парк с первого дня, без фазированного ввода")
     sim.add_argument("--export", default=None)
 
     sub.add_parser("seed", help="пересоздать парк")

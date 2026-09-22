@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from loguru import logger
 
-from src.core.database import get_session, Train, MaintenanceEvent
+from src.core.database import (NOT_DELIVERED, OPERATIONAL, RESERVE, Train,
+                               MaintenanceEvent, get_session, hour_to_datetime)
 from src.core.config import config
 from src.core.entities import TrainState
 
@@ -16,9 +17,12 @@ from src.core.entities import TrainState
 class OperationalDispatcher:
     """Оперативный диспетчер"""
     
-    def __init__(self, db_engine):
+    def __init__(self, db_engine, as_of: datetime = None):
         self.engine = db_engine
         self.session = get_session(db_engine)
+        # Часы симуляции, не настенные. Иначе плановые даты 2028 года
+        # никогда не попадают в «ближайшие 24 часа».
+        self.as_of = as_of or hour_to_datetime(0)
     
     def check_critical_situations(self) -> List[Dict]:
         """
@@ -54,19 +58,8 @@ class OperationalDispatcher:
         return alerts
     
     def _build_train_state(self, train: Train) -> TrainState:
-        """Построить состояние поезда"""
-        return TrainState(
-            train_id=train.id,
-            number=train.number,
-            status=train.status,
-            total_mileage=train.total_mileage,
-            mileages={
-                'since_is100': train.mileage_since_is100,
-                'since_is200': train.mileage_since_is200,
-                'since_is510': train.mileage_since_is510,
-                'since_wheelset_turning': train.mileage_since_wheelset,
-            }
-        )
+        """Все 8 счётчиков пробега, иначе IS520–IS700 диспетчер не видит."""
+        return TrainState.from_orm(train)
     
     def _check_critical_mileage(self, train: Train, state: TrainState) -> List[Dict]:
         """Проверка критического превышения пробега"""
@@ -118,8 +111,9 @@ class OperationalDispatcher:
     
     def _check_fleet_availability(self) -> Optional[Dict]:
         """Проверка готовности парка"""
-        total = self.session.query(Train).count()
-        operational = self.session.query(Train).filter_by(status='operational').count()
+        total = self.session.query(Train).filter(Train.status != NOT_DELIVERED).count()
+        operational = self.session.query(Train).filter(
+            Train.status.in_([OPERATIONAL, RESERVE])).count()
         
         if total == 0:
             return None
@@ -138,7 +132,7 @@ class OperationalDispatcher:
     
     def _check_depot_overload(self) -> Optional[Dict]:
         """Проверка перегрузки депо"""
-        now = datetime.now()
+        now = self.as_of
         next_24h = now + timedelta(hours=24)
         
         # Подсчитать количество поездов на обслуживании
@@ -200,7 +194,7 @@ class OperationalDispatcher:
     
     def _calculate_depot_utilization(self) -> float:
         """Рассчитать текущую загрузку депо"""
-        now = datetime.now()
+        now = self.as_of
         
         active = self.session.query(MaintenanceEvent).filter(
             MaintenanceEvent.status == 'in_progress',
@@ -221,7 +215,7 @@ class OperationalDispatcher:
         """
         logger.warning(f"Внеплановая поломка поезда ID={train_id}: {issue}")
         
-        train = self.session.query(Train).get(train_id)
+        train = self.session.get(Train, train_id)
         if not train:
             logger.error(f"Поезд ID={train_id} не найден")
             return
@@ -230,7 +224,7 @@ class OperationalDispatcher:
         train.status = 'maintenance'
         
         # Создать срочное событие обслуживания
-        now = datetime.now()
+        now = self.as_of
         event = MaintenanceEvent(
             train_id=train_id,
             service_type='emergency_repair',

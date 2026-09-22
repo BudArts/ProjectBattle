@@ -31,7 +31,7 @@ python test_run.py             # сквозной демо-прогон (1 го�
 ## Структура
 
 ```
-src/core/        конфигурация, модель данных (SQLite), сущности
+src/core/        конфигурация, модель данных (SQLite), сущности, суточный оборот
 src/planning/    strategic (PuLP, 12 мес) · tactical (OR-Tools CP-SAT, 14 дн) · operational (правила)
 src/simulation/  цифровой двойник (SimPy) — исполняет планы, собирает метрики и ML-выборку
 src/dashboard/   веб-интерфейс (Streamlit): KPI, аналитика, депо, парк, движение, ML

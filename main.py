@@ -68,7 +68,8 @@ def main():
     web.add_argument("--port", type=int, default=8501)
 
     sim = sub.add_parser("sim", help="прогон симуляции")
-    sim.add_argument("--years", type=float, default=1.0)
+    sim.add_argument("--years", type=float, default=1.0,
+                     help="горизонт прогона, от 1 до 10 лет")
     sim.add_argument("--seed", type=int, default=42)
     sim.add_argument("--scenario", default="normal",
                      choices=["normal", "high_load", "poor_maintenance"])
